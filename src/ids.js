@@ -5,7 +5,7 @@ const DOMAIN_PREFIX = {
   risk: 'RISK', capa: 'CAPA', accident: 'ACC', nearmiss: 'NM', ptw: 'PTW',
   tbm: 'TBM', edu: 'EDU', legalmeet: 'LM', voice: 'VOC', ppe: 'PPE',
   contractor: 'CT', health: 'HLT', appoint: 'APT', msds: 'MSDS', reports: 'RPT',
-  compliance: 'SAF',
+  compliance: 'SAF', equipment: 'EQP', process: 'PRC', loto: 'LOTO', lotosource: 'LOTOS', workenv: 'WENV', ergo: 'ERG', ergosym: 'ERGS', stress: 'STR', stresscns: 'STRC', inspection: 'INSP', insptpl: 'INSPT', budget: 'BDG', budgetitem: 'BDGI', ctreval: 'CTEV', review: 'REV',
 };
 
 // 안전관리 도메인 id: RISK-2026-000001 형식 (기존 앱과 동일한 규칙).

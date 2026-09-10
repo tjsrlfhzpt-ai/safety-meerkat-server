@@ -18,6 +18,9 @@ module.exports = function tbmRoutes(db) {
       { body: 'notice', column: 'notice' },
       { body: 'supervisor', column: 'supervisor' },
       { body: 'relatedContractor', column: 'related_contractor' },
+      // 2026-08-30(전자서명 서버 연동): 참석자 명단(이름+서명여부) JSON 문자열을 그대로
+      // 저장한다. 서명 이미지 자체는 이 필드가 아니라 /attachments API로 별도 업로드된다.
+      { body: 'attendees', column: 'attendees' },
     ],
   });
 };

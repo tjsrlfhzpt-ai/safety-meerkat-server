@@ -1,8 +1,9 @@
 const express = require('express');
 const { resolveIdForSite } = require('../ids');
 const { writeAudit } = require('../audit');
-const { authenticate, requirePermission, hasPermission, requireHomeSite, accessibleSiteIds } = require('../auth-middleware');
+const { authenticate, requirePermission, hasPermission, requireHomeSite, resolveTargetSiteId, accessibleSiteIds } = require('../auth-middleware');
 const { queryPaginatedList } = require('../pagination');
+const { resolveContractorLink } = require('../contractor-link');
 
 // 프론트엔드(app.html)의 PTW_STATUSES/PTW_NEXT_STATUS를 서버 쪽에서 그대로 강제합니다.
 // 프론트의 PTW_NEXT_STATUS는 정상 진행 경로만 정의하고 있어("등록→위험확인중→...→종료"),
@@ -31,15 +32,26 @@ module.exports = function ptwRoutes(db) {
 
     // 2026-08-28 점검: 다른 sync-enabled 모듈과 동일하게 site 간 id충돌로 인한 데이터유실을
     // 막기 위해 resolveIdForSite 사용 (출시전 점검보고서 2-2절)
-    const { id, alreadyExisted, idReassigned } = resolveIdForSite(db, 'ptw', 'permits', b.id, req.user.siteId);
+    // 2026-09-02: 본문 siteId 지정 시 권한검증 후 해당 사업장으로 등록.
+    const targetSiteId = resolveTargetSiteId(db, req, res);
+    if (targetSiteId === null) return;
+
+    const { id, alreadyExisted, idReassigned } = resolveIdForSite(db, 'ptw', 'permits', b.id, targetSiteId);
     if (alreadyExisted) return res.status(200).json({ id, alreadyExisted: true });
 
     db.prepare(`
       INSERT INTO permits (id, site_id, title, location, work_time, work_date, manager, worker, hazard, measure, related_contractor, memo, created_by)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(id, req.user.siteId, b.title, b.location, b.time, b.date || null, b.manager || null,
+    `).run(id, targetSiteId, b.title, b.location, b.time, b.date || null, b.manager || null,
            b.worker || null, b.hazard || null, b.measure || null, b.relatedContractor || null,
            b.memo || null, req.user.sub);
+
+    // 2026-09-02(45-4절): 협력업체 실제 연결(원본 텍스트는 위에 그대로 보존됨).
+    const ptwLink = resolveContractorLink(db, accessibleSiteIds(db, req), b);
+    if (ptwLink.error) return res.status(400).json({ error: ptwLink.error });
+    if (ptwLink.contractorId) {
+      db.prepare('UPDATE permits SET contractor_id = ? WHERE id = ?').run(ptwLink.contractorId, id);
+    }
 
     writeAudit(db, {
       actorUserId: req.user.sub, actorName: req.user.name, action: 'create',

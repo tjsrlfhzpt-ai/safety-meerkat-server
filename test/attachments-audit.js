@@ -100,6 +100,21 @@ function assert(cond, label) {
   const listAfterDelete = await apiJson('GET', `/attachments?entityType=near_miss&entityId=${nm.data.id}`, null, adminToken);
   assert(listAfterDelete.data.length === 0, '삭제 후 목록에서 사라짐');
 
+  console.log('\n=== 5. 소프트 삭제 확인 (2026-09-02) ===');
+  // 사고 현장사진·전자서명 같은 법정 증빙이 첨부되므로, 실수로 삭제해도 되돌릴 수 있어야 합니다.
+  const dlAfterDelete = await fetch(`${BASE}/attachments/${up1.data.id}/download`, { headers: { Authorization: `Bearer ${adminToken}` } });
+  assert(dlAfterDelete.status === 404, '삭제된 첨부파일은 다운로드도 차단됨');
+
+  const dbCheck = new Database(path.join(__dirname, '..', 'data.sqlite'), { readonly: true });
+  const row = dbCheck.prepare('SELECT id, file_name, file_key, deleted, deleted_by FROM attachments WHERE id = ?').get(up1.data.id);
+  dbCheck.close();
+  assert(row && row.deleted === 1, 'DB 레코드가 지워지지 않고 deleted 표시만 됨(복구 가능)');
+  assert(row && !!row.deleted_by, '누가 삭제했는지 기록이 남음(지침 10 - 변경이력)');
+  assert(row && !!row.file_name, '원본 파일명이 보존됨');
+
+  const uploadDir = path.join(path.dirname(require('../src/db').DB_PATH), 'uploads');
+  assert(fs.existsSync(path.join(uploadDir, row.file_key)), '실제 파일도 디스크에 그대로 보존됨(예전엔 즉시 삭제되어 복구 불가였음)');
+
   console.log('\n==================================================');
   console.log(`결과: ${passed}건 통과, ${failed}건 실패`);
   console.log('==================================================');

@@ -16,6 +16,8 @@ module.exports = function eduRoutes(db) {
       { body: 'absenteeNames', column: 'absentee_names' },
       { body: 'memo', column: 'memo' },
       { body: 'relatedContractor', column: 'related_contractor' },
+      // 2026-08-30: 참석자별 서명 여부 JSON. 서명 이미지 자체는 attachments API로 별도 업로드.
+      { body: 'attendees', column: 'attendees' },
     ],
   });
 };

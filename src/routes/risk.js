@@ -1,8 +1,9 @@
 const express = require('express');
 const { nextDomainId, resolveIdForSite } = require('../ids');
 const { writeAudit } = require('../audit');
-const { authenticate, requirePermission, requireHomeSite, accessibleSiteIds } = require('../auth-middleware');
+const { authenticate, requirePermission, requireHomeSite, resolveTargetSiteId, accessibleSiteIds } = require('../auth-middleware');
 const { queryPaginatedList } = require('../pagination');
+const { resolveContractorLink } = require('../contractor-link');
 
 // 어떤 점수부터 "고위험"으로 보고 CAPA를 자동 생성할지 - 기존 앱의 위험도 등급 감각과
 // 맞추기 위해 5x5 매트릭스 기준 15점(=3x5, 4x4 근처) 이상을 임계값으로 둠.
@@ -26,9 +27,13 @@ module.exports = function riskRoutes(db) {
     // site_id로 구분되지 않아 (a) 다른 사업장이 우연히 같은 id를 쓰면 데이터가 유실되고
     // (b) 그 사업장의 실제 risk_score가 응답에 그대로 노출되는 것을 재현·확인했다(출시전
     // 점검보고서 2-2절). resolveIdForSite로 사업장 경계를 지킨다.
-    const { id, alreadyExisted, idReassigned } = resolveIdForSite(db, 'risk', 'risk_assessments', b.id, req.user.siteId);
+    // 2026-09-02: 본문 siteId 지정 시 권한검증 후 해당 사업장으로 등록(본사 관리자 대리입력).
+    const targetSiteId = resolveTargetSiteId(db, req, res);
+    if (targetSiteId === null) return;
+
+    const { id, alreadyExisted, idReassigned } = resolveIdForSite(db, 'risk', 'risk_assessments', b.id, targetSiteId);
     if (alreadyExisted) {
-      const mine = db.prepare('SELECT id, risk_score FROM risk_assessments WHERE id = ? AND site_id = ?').get(id, req.user.siteId);
+      const mine = db.prepare('SELECT id, risk_score FROM risk_assessments WHERE id = ? AND site_id = ?').get(id, targetSiteId);
       return res.status(200).json({ id: mine.id, riskScore: mine.risk_score, autoCapaId: null, alreadyExisted: true });
     }
 
@@ -39,10 +44,17 @@ module.exports = function riskRoutes(db) {
         (id, site_id, process_name, task_name, hazard, existing_measures, likelihood, severity,
          risk_score, reduction_measures, status, assignee_id, due_date, related_contractor, created_by)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?)
-    `).run(id, req.user.siteId, b.processName || null, b.taskName || null, b.hazard,
+    `).run(id, targetSiteId, b.processName || null, b.taskName || null, b.hazard,
            b.existingMeasures || null, b.likelihood || null, b.severity || null, score,
            b.reductionMeasures || null, b.assigneeId || null, b.dueDate || null,
            b.relatedContractor || null, req.user.sub);
+
+    // 2026-09-02(45-4절): 협력업체 실제 연결(원본 텍스트는 위에 그대로 보존됨).
+    const riskLink = resolveContractorLink(db, accessibleSiteIds(db, req), b);
+    if (riskLink.error) return res.status(400).json({ error: riskLink.error });
+    if (riskLink.contractorId) {
+      db.prepare('UPDATE risk_assessments SET contractor_id = ? WHERE id = ?').run(riskLink.contractorId, id);
+    }
 
     writeAudit(db, {
       actorUserId: req.user.sub, actorName: req.user.name, action: 'create',
@@ -56,7 +68,7 @@ module.exports = function riskRoutes(db) {
       db.prepare(`
         INSERT INTO capa_actions (id, site_id, source_type, source_id, title, status, created_by)
         VALUES (?, ?, 'risk_assessment', ?, ?, '등록', ?)
-      `).run(autoCapaId, req.user.siteId, id, `[자동생성] 고위험 개선조치 - ${b.hazard}`, req.user.sub);
+      `).run(autoCapaId, targetSiteId, id, `[자동생성] 고위험 개선조치 - ${b.hazard}`, req.user.sub);
 
       writeAudit(db, {
         actorUserId: req.user.sub, actorName: req.user.name, action: 'create',
@@ -108,6 +120,14 @@ module.exports = function riskRoutes(db) {
       values.push(newScore);
     }
 
+    // 2026-09-02(20절 버전관리): 덮어쓰기 전에 지금 상태를 그대로 보관한다.
+    // 이렇게 해두면 "이 위험성평가가 처음엔 어땠고 언제 어떻게 바뀌었는지"를 되짚을 수 있다.
+    const nextVersion = (db.prepare('SELECT COALESCE(MAX(version_no), 0) AS v FROM risk_assessment_versions WHERE assessment_id = ?')
+      .get(req.params.id).v) + 1;
+    db.prepare(`INSERT INTO risk_assessment_versions (assessment_id, version_no, snapshot_json, changed_fields, changed_by)
+                VALUES (?, ?, ?, ?, ?)`)
+      .run(req.params.id, nextVersion, JSON.stringify(existing), touchedKeys.join(','), req.user.sub);
+
     db.prepare(
       `UPDATE risk_assessments SET ${setParts.join(', ')}, updated_at = datetime('now'), updated_by = ? WHERE id = ?`
     ).run(...values, req.user.sub, req.params.id);
@@ -138,6 +158,32 @@ module.exports = function riskRoutes(db) {
     }
 
     res.json({ ok: true, riskScore: newScore, autoCapaId });
+  });
+
+  // 2026-09-02(20절): 특정 위험성평가가 어떻게 변해왔는지 조회한다.
+  // 최신 상태는 원본 레코드에 있고, 여기서는 과거 버전들만 최신순으로 돌려준다.
+  router.get('/:id/versions', requirePermission(db, 'risk.read'), (req, res) => {
+    const siteIds = accessibleSiteIds(db, req);
+    if (!siteIds.length) return res.status(404).json({ error: '대상을 찾을 수 없습니다.' });
+    const sitePh = siteIds.map(() => '?').join(',');
+    const current = db.prepare(`SELECT * FROM risk_assessments WHERE id = ? AND site_id IN (${sitePh}) AND deleted = 0`)
+      .get(req.params.id, ...siteIds);
+    // 다른 사업장 자료의 존재 여부까지 알려주지 않도록 404로 통일한다.
+    if (!current) return res.status(404).json({ error: '대상을 찾을 수 없습니다.' });
+
+    const rows = db.prepare('SELECT version_no, snapshot_json, changed_fields, changed_by, changed_at FROM risk_assessment_versions WHERE assessment_id = ? ORDER BY version_no DESC')
+      .all(req.params.id);
+    res.json({
+      id: req.params.id,
+      current,
+      versions: rows.map((r) => ({
+        versionNo: r.version_no,
+        changedFields: r.changed_fields ? r.changed_fields.split(',') : [],
+        changedBy: r.changed_by,
+        changedAt: r.changed_at,
+        snapshot: JSON.parse(r.snapshot_json),
+      })),
+    });
   });
 
   router.get('/', requirePermission(db, 'risk.read'), (req, res) => {

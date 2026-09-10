@@ -10,7 +10,8 @@ const ROLES = [
 
 // 위험성평가/CAPA에 이어 v5.11~5.13에서 추가된 모듈들. 이 열한(단순모듈+CAPA 제외)은
 // 모두 "생성/조회/삭제"만 있는 단순 구조라 권한도 동일한 3종 세트(create/read/delete_any)로 통일한다.
-const SIMPLE_MODULES = ['nearmiss', 'tbm', 'voice', 'legalmeet', 'accident', 'msds', 'health', 'edu', 'ppe', 'appoint', 'contractor'];
+// 2026-09-02: equipment(유해·위험 기계기구 안전검사) 추가 - 다른 단순모듈과 동일 권한 등급.
+const SIMPLE_MODULES = ['nearmiss', 'tbm', 'voice', 'legalmeet', 'accident', 'msds', 'health', 'edu', 'ppe', 'appoint', 'contractor', 'equipment', 'process', 'loto', 'workenv', 'ergonomic', 'stress', 'inspection'];
 // 2026-08-28 후속조치(출시전 점검보고서 3절 "12개 모듈 PATCH API 부재"): create/read/delete_any
 // 3종뿐이라 등록 후 오타 하나도 고칠 방법이 없었다. update를 추가한다 - delete_any를 가진
 // 역할과 동일한 신뢰 등급이라고 보고 같은 목록에 묶었다(수정이 삭제보다 파괴적이지 않으므로

@@ -1,4 +1,6 @@
 const express = require('express');
+const bcrypt = require('bcryptjs');
+const crypto = require('crypto');
 const { authenticate, requirePermission, hasPermission, accessibleSiteIds } = require('../auth-middleware');
 const { writeAudit } = require('../audit');
 
@@ -118,6 +120,48 @@ module.exports = function usersRoutes(db) {
     });
 
     res.json({ ok: true, id: target.id, accountStatus });
+  });
+
+  // 2026-09-02(비밀번호 분실 복구): 지금까지 비밀번호를 잊으면 되돌릴 방법이 전혀 없어서
+  // 운영자가 DB를 직접 열어 해시를 바꿔야 했다.
+  //
+  // 이메일 발송 방식(자가 재설정 링크)을 쓰지 않은 이유: 이메일은 가입 시 필수가 아니고,
+  // 현장 근로자는 회사 이메일이 없는 경우가 많다. 또 메일 발송 인프라(SMTP/외부 서비스)
+  // 의존성이 새로 생긴다. 실제 현장 운영도 "근로자가 안전관리자에게 말하면 관리자가
+  // 재설정해주는" 흐름이라, 관리자 발급 방식이 이 서비스에 더 맞다.
+  //
+  // 안전장치:
+  //  - user.manage 권한자만, 그리고 같은 조직 사용자에게만 발급할 수 있다.
+  //  - 임시 비밀번호는 서버가 무작위로 만들고 응답에 딱 한 번만 실어 보낸다(DB에 평문 저장 안 함).
+  //  - 발급 즉시 must_change_password가 서고, 사용자는 로그인 후 반드시 새 비밀번호로 바꿔야 한다.
+  //  - 실패 횟수를 초기화하고 잠금도 함께 풀어준다(대부분 잠긴 상태로 문의가 오므로).
+  router.post('/:id/reset-password', requirePermission(db, 'user.manage'), async (req, res) => {
+    const target = db.prepare('SELECT id, org_id, login_id, name FROM users WHERE id = ? AND deleted = 0').get(req.params.id);
+    if (!target || target.org_id !== req.user.orgId) {
+      return res.status(404).json({ error: '대상을 찾을 수 없습니다.' });
+    }
+
+    // 읽기 쉬우면서도 추측이 어려운 임시 비밀번호(12자). 혼동되는 문자(0/O, 1/l/I)는 뺐다 -
+    // 관리자가 전화로 불러주거나 종이에 적어 전달하는 상황을 감안한 것이다.
+    const ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
+    let temp = '';
+    for (let i = 0; i < 12; i++) temp += ALPHABET[crypto.randomInt(ALPHABET.length)];
+
+    const hash = await bcrypt.hash(temp, 12);
+    db.prepare(`UPDATE users SET password_hash = ?, must_change_password = 1,
+                failed_login_count = 0, account_status = 'active' WHERE id = ?`).run(hash, target.id);
+
+    writeAudit(db, {
+      actorUserId: req.user.sub, actorName: req.user.name, action: 'update',
+      entityType: 'user', entityId: target.id,
+      after: { passwordReset: true },   // 임시 비밀번호 자체는 감사로그에도 남기지 않는다
+    });
+
+    res.json({
+      ok: true, loginId: target.login_id, name: target.name,
+      temporaryPassword: temp,
+      notice: '이 임시 비밀번호는 지금 한 번만 표시됩니다. 본인에게 전달하고, 로그인 후 즉시 새 비밀번호로 변경하도록 안내하세요.',
+    });
   });
 
   return router;

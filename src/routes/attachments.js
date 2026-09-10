@@ -41,6 +41,15 @@ const ENTITY_TYPES = {
   ppe: { table: 'ppe_records', permPrefix: 'ppe' },
   appoint: { table: 'legal_appointments', permPrefix: 'appoint' },
   contractor: { table: 'contractors', permPrefix: 'contractor' },
+  equipment: { table: 'equipment', permPrefix: 'equipment' },
+  process: { table: 'processes', permPrefix: 'process' },
+  loto: { table: 'loto_permits', permPrefix: 'loto' },
+  workenv: { table: 'work_env_measurements', permPrefix: 'workenv' },
+  ergonomic: { table: 'ergonomic_surveys', permPrefix: 'ergonomic' },
+  stress: { table: 'stress_assessments', permPrefix: 'stress' },
+  inspection: { table: 'inspections', permPrefix: 'inspection' },
+  budgetitem: { table: 'safety_budget_items', permPrefix: 'contractor' },
+  ctreval: { table: 'contractor_evaluations', permPrefix: 'contractor' },
   ptw: { table: 'permits', permPrefix: 'ptw' },
   capa: { table: 'capa_actions', permPrefix: 'capa' },
 };
@@ -68,6 +77,13 @@ const upload = multer({
   storage,
   limits: { fileSize: MAX_FILE_SIZE },
   fileFilter: (req, file, cb) => {
+    // 2026-08-30(전자서명 서버연동 검증 중 실제로 재현·발견): multer/busboy는 멀티파트
+    // 폼의 파일명 헤더를 기본적으로 latin1(binary)로 파싱한다 - 잘 알려진 이슈다. 그래서
+    // "서명_김코스.png" 같은 한글 파일명이 "ìëª_ê¹ì½ì¤.png"처럼 깨져서 저장됐다.
+    // fileFilter는 storage.filename보다 먼저 실행되므로, 여기서 한 번만 UTF-8로
+    // 재해석해두면 이후 모든 참조(파일 확장자 검사, 디스크 저장 파일명, DB의 file_name
+    // 컬�럼)가 전부 올바른 값을 쓰게 된다.
+    file.originalname = Buffer.from(file.originalname, 'latin1').toString('utf8');
     const ext = path.extname(file.originalname).toLowerCase();
     if (!ALLOWED[ext]) return cb(new Error(`허용되지 않는 파일 형식입니다 (${ext || '확장자 없음'}). 허용: ${Object.keys(ALLOWED).join(', ')}`));
     cb(null, true);
@@ -137,13 +153,13 @@ module.exports = function attachmentsRoutes(db) {
       return res.status(403).json({ error: `권한이 없습니다: ${resolved.meta.permPrefix}.read` });
     }
 
-    const rows = db.prepare('SELECT id, file_name, mime_type, uploaded_by, uploaded_at FROM attachments WHERE entity_type = ? AND entity_id = ? ORDER BY uploaded_at DESC')
+    const rows = db.prepare('SELECT id, file_name, mime_type, uploaded_by, uploaded_at FROM attachments WHERE entity_type = ? AND entity_id = ? AND deleted = 0 ORDER BY uploaded_at DESC')
       .all(entityType, entityId);
     res.json(rows);
   });
 
   router.get('/:id/download', (req, res) => {
-    const att = db.prepare('SELECT * FROM attachments WHERE id = ?').get(req.params.id);
+    const att = db.prepare('SELECT * FROM attachments WHERE id = ? AND deleted = 0').get(req.params.id);
     if (!att) return res.status(404).json({ error: '대상을 찾을 수 없습니다.' });
 
     const siteIds = accessibleSiteIds(db, req);
@@ -161,7 +177,7 @@ module.exports = function attachmentsRoutes(db) {
   });
 
   router.delete('/:id', (req, res) => {
-    const att = db.prepare('SELECT * FROM attachments WHERE id = ?').get(req.params.id);
+    const att = db.prepare('SELECT * FROM attachments WHERE id = ? AND deleted = 0').get(req.params.id);
     if (!att) return res.status(404).json({ error: '대상을 찾을 수 없습니다.' });
 
     const siteIds = accessibleSiteIds(db, req);
@@ -171,8 +187,11 @@ module.exports = function attachmentsRoutes(db) {
       return res.status(403).json({ error: `권한이 없습니다: ${resolved.meta.permPrefix}.update` });
     }
 
-    db.prepare('DELETE FROM attachments WHERE id = ?').run(att.id);
-    fs.unlink(path.join(UPLOAD_DIR, att.file_key), () => {});
+    // 2026-09-02: 하드 삭제 → 소프트 삭제. 예전에는 DB 레코드와 실물 파일을 즉시 지워서
+    // 실수로 삭제하면 되돌릴 방법이 전혀 없었다. 사고 현장사진·전자서명 같은 법정 증빙이
+    // 포함되므로 위험이 크다. 이제 목록에서만 감추고 파일은 그대로 보존한다(복구 가능).
+    db.prepare("UPDATE attachments SET deleted = 1, deleted_at = datetime('now'), deleted_by = ? WHERE id = ?")
+      .run(req.user.sub, att.id);
 
     writeAudit(db, {
       actorUserId: req.user.sub, actorName: req.user.name, action: 'delete',

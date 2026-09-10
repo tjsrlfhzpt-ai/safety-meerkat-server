@@ -1,8 +1,9 @@
 const express = require('express');
 const { resolveIdForSite } = require('../ids');
 const { writeAudit } = require('../audit');
-const { authenticate, requirePermission, requireHomeSite, accessibleSiteIds } = require('../auth-middleware');
+const { authenticate, requirePermission, requireHomeSite, resolveTargetSiteId, accessibleSiteIds } = require('../auth-middleware');
 const { queryPaginatedList } = require('../pagination');
+const { resolveContractorLink } = require('../contractor-link');
 
 // 위험성평가처럼 특별한 부가로직(고위험 시 CAPA 자동생성 등)이 있는 모듈은 이 팩토리를
 // 쓰지 않고 risk.js/capa.js처럼 직접 작성합니다. 이 팩토리는 "생성 + 목록조회 + 소프트삭제"만
@@ -42,11 +43,29 @@ function createSimpleCrudRoutes(db, config) {
     // 사업장이 우연히 같은 id를 보내면 나중 사업장 데이터가 조용히 유실되는 것을 재현·확인했다
     // (출시전 점검보고서 2-2절). resolveIdForSite가 다른 사업장 소유 id는 재사용하지 않고
     // 새로 채번해 이 문제를 막는다.
-    const { id, alreadyExisted, idReassigned } = resolveIdForSite(db, config.domainType, config.table, b.id, req.user.siteId);
+    // 2026-09-02: 본문에 siteId가 오면 권한검증 후 그 사업장으로 등록한다(본사 관리자가
+    // 여러 현장 데이터를 대신 입력할 수 있게 함). 권한 밖이면 resolveTargetSiteId가 403 응답.
+    const targetSiteId = resolveTargetSiteId(db, req, res);
+    if (targetSiteId === null) return;
+
+    const { id, alreadyExisted, idReassigned } = resolveIdForSite(db, config.domainType, config.table, b.id, targetSiteId);
     if (alreadyExisted) return res.status(200).json({ id, alreadyExisted: true });
 
-    const values = [id, req.user.siteId, ...config.fields.map(f => (b[f.body] !== undefined ? b[f.body] : null)), req.user.sub];
+    // 2026-09-02(45-4절): 협력업체를 실제 업체와 연결합니다. 목록에서 골랐으면 그 id를,
+    // 이름만 적었으면 같은 이름의 업체를 찾아 연결합니다. 원본 텍스트는 그대로 보존됩니다.
+    let contractorId = null;
+    if (config.fields.some((f) => f.column === 'related_contractor')) {
+      const link = resolveContractorLink(db, accessibleSiteIds(db, req), b);
+      if (link.error) return res.status(400).json({ error: link.error });
+      contractorId = link.contractorId;
+    }
+
+    const values = [id, targetSiteId, ...config.fields.map(f => (b[f.body] !== undefined ? b[f.body] : null)), req.user.sub];
     db.prepare(insertSql).run(...values);
+
+    if (contractorId) {
+      db.prepare(`UPDATE ${config.table} SET contractor_id = ? WHERE id = ?`).run(contractorId, id);
+    }
 
     writeAudit(db, {
       actorUserId: req.user.sub, actorName: req.user.name, action: 'create',
@@ -61,7 +80,7 @@ function createSimpleCrudRoutes(db, config) {
     // risk.js처럼 새로 작성하지 않고, 훅 하나만 선택적으로 열어준다.
     let extra = {};
     if (typeof config.afterCreate === 'function') {
-      extra = config.afterCreate({ db, id, siteId: req.user.siteId, userId: req.user.sub, userName: req.user.name, body: b }) || {};
+      extra = config.afterCreate({ db, id, siteId: targetSiteId, userId: req.user.sub, userName: req.user.name, body: b }) || {};
     }
 
     res.status(201).json({ id, ...(idReassigned ? { idReassigned: true } : {}), ...extra });
@@ -101,6 +120,14 @@ function createSimpleCrudRoutes(db, config) {
     db.prepare(
       `UPDATE ${config.table} SET ${setClause}, updated_at = datetime('now'), updated_by = ? WHERE id = ?`
     ).run(...touched.map((f) => b[f.body]), req.user.sub, req.params.id);
+
+    // 협력업체를 바꿨다면 연결도 다시 계산합니다(텍스트만 바뀌고 연결이 옛 업체에
+    // 남아있으면 집계가 어긋나기 때문입니다).
+    if (touched.some((f) => f.column === 'related_contractor') || b.contractorId !== undefined) {
+      const link = resolveContractorLink(db, siteIds, b);
+      if (link.error) return res.status(400).json({ error: link.error });
+      db.prepare(`UPDATE ${config.table} SET contractor_id = ? WHERE id = ?`).run(link.contractorId, req.params.id);
+    }
 
     writeAudit(db, {
       actorUserId: req.user.sub, actorName: req.user.name, action: 'update',

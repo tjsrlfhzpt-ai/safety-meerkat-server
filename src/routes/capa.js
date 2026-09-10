@@ -1,6 +1,6 @@
 const express = require('express');
-const { authenticate, requirePermission, hasPermission, requireHomeSite, accessibleSiteIds } = require('../auth-middleware');
-const { nextDomainId } = require('../ids');
+const { authenticate, requirePermission, hasPermission, requireHomeSite, resolveTargetSiteId, accessibleSiteIds } = require('../auth-middleware');
+const { nextDomainId, resolveIdForSite } = require('../ids');
 const { writeAudit } = require('../audit');
 const { queryPaginatedList } = require('../pagination');
 
@@ -27,6 +27,11 @@ const VALID_SOURCE_TYPES = {
   legalmeet: 'legal_meetings',
   voice: 'voice_reports',
   ptw: 'permits',
+  workenv: 'work_env_measurements',   // 2026-09-02: 작업환경측정 기준초과 → 개선조치
+  ergonomic: 'ergonomic_surveys',     // 2026-09-02: 근골격계 고위험 작업 → 개선조치
+  stress: 'stress_assessments',       // 2026-09-02: 직무스트레스 고위험군 → 조직 차원 개선
+  inspection: 'inspections',          // 2026-09-05: 안전점검 부적합 → 개선조치
+  review: 'compliance_reviews',       // 2026-09-05: 반기점검 미이행 → 개선조치
   report: null, // 특정 근거 기록 없이 여는 CAPA (정기점검 등에서 발견한 사항)
 };
 
@@ -56,18 +61,27 @@ module.exports = function capaRoutes(db) {
       sourceId = b.sourceId;
     }
 
-    const id = nextDomainId(db, 'capa');
+    // 2026-09-02: 본문 siteId 지정 시 권한검증 후 해당 사업장으로 등록.
+    const targetSiteId = resolveTargetSiteId(db, req, res);
+    if (targetSiteId === null) return;
+
+    // 2026-09-02: 예전에는 클라이언트가 보낸 id를 무시하고 서버가 새 id를 발급했다.
+    // 그러면 앱의 CAPA와 서버의 CAPA가 서로 다른 id를 갖게 되어, 앱에서 상태를 바꿀 때
+    // 엉뚱한 항목을 가리키거나 아예 404가 난다. 다른 12개 모듈이 이미 쓰고 있는
+    // resolveIdForSite로 통일한다(중복이면 재채번, 같은 사업장에 이미 있으면 그대로 반환).
+    const { id, alreadyExisted, idReassigned } = resolveIdForSite(db, 'capa', 'capa_actions', b.id, targetSiteId);
+    if (alreadyExisted) return res.status(200).json({ id, alreadyExisted: true });
     db.prepare(`
       INSERT INTO capa_actions (id, site_id, source_type, source_id, title, description, assignee_id, due_date, status, created_by)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, '등록', ?)
-    `).run(id, req.user.siteId, sourceType, sourceId, b.title, b.description || null, b.assigneeId || null, b.dueDate || null, req.user.sub);
+    `).run(id, targetSiteId, sourceType, sourceId, b.title, b.description || null, b.assigneeId || null, b.dueDate || null, req.user.sub);
 
     writeAudit(db, {
       actorUserId: req.user.sub, actorName: req.user.name, action: 'create',
       entityType: 'capa_action', entityId: id, after: b,
     });
 
-    res.status(201).json({ id });
+    res.status(201).json(idReassigned ? { id, idReassigned: true } : { id });
   });
 
   router.get('/', requirePermission(db, 'capa.read'), (req, res) => {

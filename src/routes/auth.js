@@ -10,7 +10,7 @@ const { JWT_SECRET, authenticate } = require('../auth-middleware');
 // ⚠️ 이 문서는 사업자등록번호 등 실제 정보 없이 "임의설정"으로 작성된 초안입니다.
 // 실제 서비스 전에 반드시 법률 검토를 거쳐야 합니다 - 프론트엔드 정책 전문 상단에도
 // 동일하게 명시해뒀습니다.
-const CURRENT_POLICY_VERSION = '2026-08-30-v1';
+const CURRENT_POLICY_VERSION = '2026-09-05-v2';
 
 function needsConsent(user) {
   return !user.consent_privacy_at || !user.consent_terms_at || !user.consent_sensitive_at
@@ -120,7 +120,36 @@ module.exports = function authRoutes(db) {
 
     writeAudit(db, { actorUserId: user.id, actorName: user.name, action: 'login', entityType: 'user', entityId: user.id, ip: req.ip });
 
-    res.json({ token, user: { id: user.id, name: user.name, roles, siteId: user.site_id, siteIds, needsConsent: needsConsent(user) } });
+    res.json({ token, user: { id: user.id, name: user.name, roles, siteId: user.site_id, siteIds, needsConsent: needsConsent(user), mustChangePassword: user.must_change_password === 1 } });
+  });
+
+  // 2026-09-02(비밀번호 복구): 사용자가 스스로 비밀번호를 바꾼다. 두 가지 상황에서 쓰인다.
+  //  (1) 임시 비밀번호를 받은 직후 - 반드시 바꿔야 계속 쓸 수 있다.
+  //  (2) 평소에 자발적으로 바꿀 때.
+  // 어느 경우든 "현재 비밀번호"를 다시 확인한다 - 자리를 비운 사이 남이 만지는 것을 막기 위함이다.
+  router.post('/change-password', authenticate, async (req, res) => {
+    const { currentPassword, newPassword } = req.body || {};
+    if (!newPassword || String(newPassword).length < 8) {
+      return res.status(400).json({ error: '새 비밀번호는 8자 이상이어야 합니다.' });
+    }
+    const user = db.prepare('SELECT id, password_hash FROM users WHERE id = ? AND deleted = 0').get(req.user.sub);
+    if (!user) return res.status(404).json({ error: '사용자를 찾을 수 없습니다.' });
+
+    const ok = await bcrypt.compare(currentPassword || '', user.password_hash);
+    if (!ok) return res.status(400).json({ error: '현재 비밀번호가 올바르지 않습니다.' });
+
+    const same = await bcrypt.compare(newPassword, user.password_hash);
+    if (same) return res.status(400).json({ error: '이전과 다른 비밀번호를 사용해 주세요.' });
+
+    const hash = await bcrypt.hash(newPassword, 12);
+    db.prepare('UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?').run(hash, user.id);
+
+    writeAudit(db, {
+      actorUserId: user.id, actorName: req.user.name, action: 'update',
+      entityType: 'user', entityId: user.id, after: { passwordChanged: true },
+    });
+
+    res.json({ ok: true });
   });
 
   // 2026-08-28 후속조치(출시전 점검보고서 2-3절): 개인정보보호법상 이용자는 언제든 자신의

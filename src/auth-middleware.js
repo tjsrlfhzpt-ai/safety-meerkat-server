@@ -43,12 +43,31 @@ function accessibleSiteIds(db, req) {
 // 등록하려 하면 site_id NOT NULL 제약 위반으로 알 수 없는 500이 났다 - 생성계열 라우트
 // 앞단에서 미리 걸러 이해할 수 있는 400으로 바꾼다.
 function requireHomeSite(req, res, next) {
-  if (!req.user.siteId) {
+  // 2026-09-02: 본문에 siteId를 명시하면 조직전역 관리자(소속 사업장 없음)도 등록할 수
+  // 있어야 하므로, 그 경우는 통과시키고 실제 권한검증은 resolveTargetSiteId가 담당한다.
+  if (!req.user.siteId && !(req.body && req.body.siteId)) {
     return res.status(400).json({
-      error: '이 계정은 특정 사업장에 소속되어 있지 않아 데이터를 등록할 수 없습니다. 사업장이 지정된 계정으로 등록하거나, 관리자에게 사업장 배정을 요청하세요.',
+      error: '이 계정은 특정 사업장에 소속되어 있지 않아 데이터를 등록할 수 없습니다. 등록할 사업장을 선택하거나, 관리자에게 사업장 배정을 요청하세요.',
     });
   }
   next();
+}
+
+// 2026-09-02(마스터 프롬프트 15·17절 대응): 지금까지는 "자기 소속 사업장"에만 데이터를
+// 등록할 수 있었다. 그래서 본사 안전관리자가 여러 현장을 순회하며 대신 입력하거나,
+// 조직전역 관리자가 특정 현장 데이터를 등록하는 것이 API 레벨에서 아예 불가능했다.
+// 이제 요청 본문에 siteId가 오면 "그 사용자가 실제로 접근 가능한 사업장인지"를 서버가
+// 검증한 뒤 그 사업장으로 등록한다. 권한 밖 사업장을 지정하면 403으로 막는다.
+// (클라이언트가 보낸 값을 그대로 믿지 않는 것이 핵심 - 마스터 프롬프트 16·37절)
+function resolveTargetSiteId(db, req, res) {
+  const requested = req.body && req.body.siteId;
+  if (!requested) return req.user.siteId;
+  const allowed = accessibleSiteIds(db, req);
+  if (!allowed.includes(requested)) {
+    res.status(403).json({ error: '해당 사업장에 데이터를 등록할 권한이 없습니다.' });
+    return null;
+  }
+  return requested;
 }
 
 // 라우트가 db를 쥐고 있으므로 클로저로 주입받는다.
@@ -77,4 +96,4 @@ function hasPermission(db, userId, code) {
   return !!row;
 }
 
-module.exports = { authenticate, requirePermission, requireHomeSite, hasPermission, accessibleSiteIds, JWT_SECRET };
+module.exports = { authenticate, requirePermission, requireHomeSite, resolveTargetSiteId, hasPermission, accessibleSiteIds, JWT_SECRET };
