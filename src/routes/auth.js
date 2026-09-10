@@ -5,12 +5,12 @@ const { generateId } = require('../ids');
 const { writeAudit } = require('../audit');
 const { JWT_SECRET, authenticate } = require('../auth-middleware');
 
-// 2026-08-28(2-3절): 정책 문서가 바뀌면 이 버전을 올린다 - 그러면 이미 동의했던 사용자도
-// 다음 로그인 때 다시 동의 화면을 보게 된다(개인정보처리방침 개정 시 재동의 원칙).
+// 2026-09-10: 정책 버전은 src/policy.js에서만 관리한다(bootstrap-admin.js도 같은 값을
+// 쓰기 때문에 양쪽에 적어두면 어긋날 수 있다).
 // ⚠️ 이 문서는 사업자등록번호 등 실제 정보 없이 "임의설정"으로 작성된 초안입니다.
 // 실제 서비스 전에 반드시 법률 검토를 거쳐야 합니다 - 프론트엔드 정책 전문 상단에도
 // 동일하게 명시해뒀습니다.
-const CURRENT_POLICY_VERSION = '2026-09-05-v2';
+const { CURRENT_POLICY_VERSION } = require('../policy');
 
 function needsConsent(user) {
   return !user.consent_privacy_at || !user.consent_terms_at || !user.consent_sensitive_at

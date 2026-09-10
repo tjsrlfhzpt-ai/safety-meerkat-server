@@ -325,12 +325,44 @@ for (const t of CONTRACTOR_LINKED_TABLES) {
 // 2026-08-30(운영 모니터링): schema.sql은 신규 설치 때만 실행되므로, 이미 떠 있는 서버의
 // 기존 DB에도 이 테이블이 생기도록 별도로 한 번 더 만든다(이미 있으면 아무 일도 안 함).
 
+// ============================================================================
+// 2026-09-10: 회원가입(가입코드) 도입
+// ----------------------------------------------------------------------------
+// 근로자가 자기 회사에 합류하려면 회사를 특정할 방법이 필요한데, 내부 ID
+// (ORG-2026-xxxxxxxx)를 외우게 할 수는 없다. 회사마다 짧은 가입코드를 두고
+// 관리자가 근로자에게 알려주는 방식으로 한다.
+//
+// 코드 형식: 영문 대문자+숫자 6자. 사람이 받아적고 입력하는 값이라 혼동하기 쉬운
+// 문자(0/O, 1/I/L)는 애초에 후보에서 제외한다.
+// ============================================================================
+addColumnIfMissing('organizations', 'join_code', 'join_code TEXT');
 
-
-
-
-
-
+const JOIN_CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+function makeJoinCode() {
+  let s = '';
+  for (let i = 0; i < 6; i += 1) {
+    s += JOIN_CODE_ALPHABET[Math.floor(Math.random() * JOIN_CODE_ALPHABET.length)];
+  }
+  return s;
+}
+// 이미 존재하는 조직에는 코드가 없으므로 한 번 채워준다(신규 설치 시엔 대상이 0건).
+// UNIQUE 인덱스를 걸기 "전에" 채워야 중복으로 인덱스 생성이 실패하지 않는다.
+const orgsWithoutCode = db.prepare('SELECT id FROM organizations WHERE join_code IS NULL').all();
+if (orgsWithoutCode.length > 0) {
+  const used = new Set(
+    db.prepare('SELECT join_code FROM organizations WHERE join_code IS NOT NULL').all().map((r) => r.join_code)
+  );
+  const upd = db.prepare('UPDATE organizations SET join_code = ? WHERE id = ?');
+  for (const org of orgsWithoutCode) {
+    let code = makeJoinCode();
+    while (used.has(code)) code = makeJoinCode();
+    used.add(code);
+    upd.run(code, org.id);
+  }
+  console.log(`[db] 마이그레이션: 기존 조직 ${orgsWithoutCode.length}건에 가입코드 부여`);
+}
+db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_organizations_join_code ON organizations(join_code)');
 
 module.exports = db;
 module.exports.DB_PATH = DB_PATH;
+module.exports.makeJoinCode = makeJoinCode;

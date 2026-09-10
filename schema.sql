@@ -21,6 +21,7 @@ CREATE TABLE organizations (
   id            TEXT PRIMARY KEY,
   name          TEXT NOT NULL,
   biz_reg_no    TEXT,
+  join_code     TEXT,                             -- 근로자 가입용 6자리 코드 (2026-09-10)
   plan_tier     TEXT NOT NULL DEFAULT 'free',   -- free/basic/professional/enterprise (52번)
   status        TEXT NOT NULL DEFAULT 'active',
   created_at    TEXT NOT NULL DEFAULT (datetime('now')),

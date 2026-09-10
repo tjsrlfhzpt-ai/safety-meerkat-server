@@ -4,6 +4,8 @@ require('dotenv').config();
 const app = require('./src/app');
 const db = require('./src/db');
 const { ensureSeed } = require('./src/seed');
+const { ensureBootstrapAdmin } = require('./src/bootstrap-admin');
+const { seedDemoData } = require('./src/demo-data');
 const { scheduleAutoBackup } = require('./src/backup');
 
 // 역할/권한 체계가 자동으로 준비되도록 함 (조직/사업장은 2026-08-30부터 /setup 화면
@@ -14,6 +16,32 @@ try {
 } catch (e) {
   console.error('[fatal] 초기 시드 실패:', e);
   process.exit(1);
+}
+
+// 2026-09-10: 최초 관리자 계정 자동 생성 (src/bootstrap-admin.js 참고).
+// ensureSeed()가 역할(company_admin)을 먼저 만들어야 하므로 반드시 그 뒤에 온다.
+// 여기서 실패해도 서버 자체는 정상 기동시킨다 - 계정 생성은 편의 기능이고,
+// /setup 페이지라는 대체 경로가 항상 살아있기 때문이다.
+try {
+  const boot = ensureBootstrapAdmin(db);
+  // 2026-09-10: 마스터 관리자가 "이번에 새로 만들어졌을 때만" 예시 데이터를 넣는다.
+  // 이미 쓰던 서버를 재기동할 때 예시가 다시 끼어들지 않게 하기 위함이다.
+  if (boot && boot.created) {
+    try {
+      const demo = seedDemoData(db, { siteId: boot.siteId, userId: boot.userId });
+      if (demo.seeded) {
+        const total = Object.values(demo.counts).reduce((a, b) => a + b, 0);
+        console.log(`[demo] 테스트용 예시 데이터 ${total}건 생성 완료 (제목에 "[예시]" 표시)`);
+        console.log('[demo] 실제 데이터를 넣기 시작하면 SEED_DEMO_DATA 환경변수를 꺼주세요.');
+      }
+    } catch (e) {
+      // 예시 데이터는 편의 기능일 뿐이므로 실패해도 서버는 정상 기동시킨다.
+      console.error('[demo] 예시 데이터 생성 실패 (서버는 계속 기동합니다):', e.message);
+    }
+  }
+} catch (e) {
+  console.error('[bootstrap] 최초 관리자 생성 실패 (서버는 계속 기동합니다):', e.message);
+  console.error('[bootstrap] 대신 브라우저에서 /setup 페이지로 계정을 만들 수 있습니다.');
 }
 
 const PORT = process.env.PORT || 4000;
